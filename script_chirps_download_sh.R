@@ -1,0 +1,117 @@
+### HOUNGNIBO MANDELA- SONGOTI HENRI- SEYDOU TRAORE 10/2020#####
+
+packages <- c("lubridate", "stringr","rgdal","raster","ncdf4","curl","R.utils")
+if (length(setdiff(packages, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packages, rownames(installed.packages())))  
+}
+
+rm(list=ls())
+#library
+require(lubridate)
+require(stringr)
+options("rgdal_show_exportToProj4_warnings"="none")
+library(rgdal)
+library(raster)
+library(ncdf4)
+library(curl)
+library(R.utils)
+
+#lien de telechargement des donnees
+#lnk.url<-"https://data.chc.ucsb.edu/products/chirps_v2/daily"
+lnk.url<-"https://data.chc.ucsb.edu/products/CHIRPS-2.0/africa_daily/tifs/p05"
+#https://data.chc.ucsb.edu/products/CHIRPS-2.0/africa_daily/tifs/p05/2022/chirps-v2.0.2022.04.05.tif.gz
+#https://data.chc.ucsb.edu/products/CHIRPS-2.0/africa_daily/tifs/p05/2020/chirps.2020.02.05.tif.gz
+#https://data.chc.ucsb.edu/products/CHIRPS-2.0/africa_daily/tifs/p05/2022/chirps-v2.0.2022.05.06.tif.gz
+
+#definir les options de telechargement
+#curl::handle_reset(handle)
+h <- curl::new_handle()
+curl::handle_setopt(h, low_speed_limit=10,low_speed_time=180)
+
+#repertoire de sauvegarde
+dir_save_nc <-"/data_cdt/SATELLITE_DATA/model_data/chirps_v2/nc"
+if(!dir.exists(dir_save_nc)){dir.create(dir_save_nc,recursive=TRUE)}
+dir_save_tiff_globe <-"/data_cdt/SATELLITE_DATA/model_data/chirps_v2/tiff/Afrique"
+if(!dir.exists(dir_save_tiff_globe)){dir.create(dir_save_tiff_globe,recursive=TRUE)}
+dir_save_tiff_cilss <-"/data_cdt/SATELLITE_DATA/model_data/chirps_v2/tiff/Cilss"
+if(!dir.exists(dir_save_tiff_cilss)){dir.create(dir_save_tiff_cilss,recursive=TRUE)}
+
+#pour un eventuel decoupage
+zone.cilss <- as(extent(-20,30,0,30),"SpatialPolygons")
+zone.afrique <- as(extent(-20.05,55.05,-40.05,40.05),"SpatialPolygons")
+
+#periode des donnees
+start_date <- ymd("2022-05-01")
+#todays <- ymd("1983-01-31")
+todays <- today(tzone = "")
+
+dd.tmp1<- do.call("rbind", strsplit(as.character(seq(start_date, todays, "day")), "-"))
+
+all_link <-paste(lnk.url,dd.tmp1[, 1],
+                 paste("chirps-v2.0.", dd.tmp1[, 1], ".", dd.tmp1[, 2], ".", dd.tmp1[, 3], ".tif.gz",sep = ""),sep = "/")
+
+already.down <- list.files(dir_save_tiff_globe)
+
+print("*********all_link************")
+print(all_link)
+
+print("========already.down==================")
+print(already.down)
+
+
+#Verification des fichiers avant telechargement 
+
+to.down<- all_link[!(unlist(str_extract_all(unlist(all_link),
+
+                                            paste("chirps-v2.0.", dd.tmp1[, 1], ".", dd.tmp1[, 2], ".", dd.tmp1[, 3], ".tif",se
+p = "")))%in%already.down)]
+print("=========to.down=================")
+print(to.down)
+
+
+
+for(i in seq(to.down)){ 
+  t1=try(curl::curl_download(to.down[[i]],destfile = paste(dir_save_tiff_globe,basename(to.down[[i]]),sep = "/"),handle = h),silent = T)
+  
+  if(!inherits(t1, "try-error")){
+    path=gunzip(paste(dir_save_tiff_globe,basename(to.down[[i]]),sep = "/"),paste(dir_save_tiff_globe,stringr::str_replace(basename(to.down[[i]]),".tif.gz",".tif"),sep = "/"))
+    read.rfe=raster::raster(path)
+    NAvalue(read.rfe)<--9999
+    unlink(path)
+    crs(zone.cilss) <- crs(read.rfe)
+    raster::crop(read.rfe,zone.afrique,filename=paste(dir_save_tiff_globe,stringr::str_replace(basename(to.down[[i]]),".tif.gz",".tif"),sep = "/"))
+    raster::crop(read.rfe,zone.cilss,filename=paste(dir_save_tiff_cilss,stringr::str_replace(basename(to.down[[i]]),".tif.gz",".tif"),sep = "/"))
+    nc.read.rfe=raster::raster(paste(dir_save_tiff_globe,stringr::str_replace(basename(to.down[[i]]),".tif.gz",".tif"),sep = "/"))
+    
+    #ecriture du fichier netcdf
+    lon_lat=xyFromCell(nc.read.rfe,cellsFromExtent(nc.read.rfe,extent(nc.read.rfe)))
+    lon=unique(round(lon_lat[,1],4))
+    lat=unique(round(lon_lat[,2],4))
+    value=raster::as.matrix(nc.read.rfe)
+    mis_val=NAvalue(nc.read.rfe)
+    
+    if(is.infinite(mis_val)==T){value[is.infinite(value)] <- NA}
+    value[value == -9999] <- NA
+
+    ox <- order(lon)
+    oy <- order(lat)
+    lon <- lon[ox]
+    lat <- lat[oy]
+    value=t(value)
+    value <- value[ox, oy]
+    
+    
+    dx <- ncdf4::ncdim_def("lon", "degreeE", lon, longname = "Longitude")
+    dy <- ncdf4::ncdim_def("lat", "degreeN", lat, longname = "Latitude")
+    missval <- -99
+    longname <- "Precipitation Estimation chirps"
+    ncgrd <- ncdf4::ncvar_def("rfe", "mm", list(dx, dy), missval, longname, "float", compression = 9)
+    value[is.na(value)] <- missval
+    nc <- ncdf4::nc_create(paste(dir_save_nc,paste0(gsub("[.]tif.gz$", "",basename(to.down[[i]])),".nc"),sep = "/"), ncgrd)
+    ncdf4::ncvar_put(nc, ncgrd, value)
+    ncdf4::nc_close(nc)
+    
+    }
+}
+
+
